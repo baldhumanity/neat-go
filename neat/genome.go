@@ -273,58 +273,95 @@ func (g *Genome) ConfigureCrossover(parent1, parent2 *Genome) {
 
 // Mutate applies mutations to the genome, including structural and attribute mutations.
 func (g *Genome) Mutate() {
-	// Determine if only a single structural mutation should occur (if configured)
-	singleMutation := g.Config.SingleStructuralMutation
-	// Python's 'structural_mutation_surer' is complex, mapping 'default' -> single_structural_mutation
-	// We'll simplify here: if singleMutation is true, we *might* do one structural change.
-	structureMutated := false
+	// Determine if structural mutation should occur.
+	// Handle 'single_structural_mutation' and 'structural_mutation_surer'.
+	// Placeholder logic - assumes only one structural mutation max if single=true.
+	// 'surer' logic not implemented yet.
+	if g.Config.SingleStructuralMutation {
+		mutNodeAdd := rand.Float64() < g.Config.NodeAddProb
+		mutConnAdd := rand.Float64() < g.Config.ConnAddProb
+		mutNodeDel := rand.Float64() < g.Config.NodeDeleteProb
+		mutConnDel := rand.Float64() < g.Config.ConnDeleteProb
 
-	// --- Structural Mutations ---
+		// Count how many structural mutations are candidates
+		candidates := 0
+		if mutNodeAdd {
+			candidates++
+		}
+		if mutConnAdd {
+			candidates++
+		}
+		if mutNodeDel {
+			candidates++
+		}
+		if mutConnDel {
+			candidates++
+		}
 
-	// Mutate: Add Node
-	if rand.Float64() < g.Config.NodeAddProb {
-		g.mutateAddNode()
-		structureMutated = true
-	}
+		structureMutated := false
+		if candidates > 0 {
+			// Choose one candidate mutation randomly if multiple triggered
+			choice := rand.Intn(candidates)
+			idx := 0
 
-	// Mutate: Add Connection
-	if !singleMutation || !structureMutated {
+			if mutNodeAdd {
+				if idx == choice {
+					g.mutateAddNode()
+					structureMutated = true
+				}
+				idx++
+			}
+			if !structureMutated && mutConnAdd {
+				if idx == choice {
+					g.mutateAddConnection()
+					structureMutated = true
+				}
+				idx++
+			}
+			if !structureMutated && mutNodeDel {
+				if idx == choice {
+					g.mutateDeleteNode()
+					structureMutated = true
+				}
+				idx++
+			}
+			if !structureMutated && mutConnDel {
+				if idx == choice {
+					g.mutateDeleteConnection()
+					// structureMutated = true // No need to set, it's the last possible one
+				}
+				// idx++ // No need to increment
+			}
+		}
+
+	} else {
+		// Allow multiple structural mutations if single=false
+		if rand.Float64() < g.Config.NodeAddProb {
+			g.mutateAddNode()
+		}
 		if rand.Float64() < g.Config.ConnAddProb {
 			g.mutateAddConnection()
-			structureMutated = true
 		}
-	}
-
-	// Mutate: Delete Node (Optional, often less critical than adding)
-	// Need careful implementation to handle associated connections.
-	if !singleMutation || !structureMutated {
 		if rand.Float64() < g.Config.NodeDeleteProb {
-			// g.mutateDeleteNode() // Placeholder - implement if needed
-			// structureMutated = true
+			g.mutateDeleteNode()
 		}
-	}
-
-	// Mutate: Delete Connection (Optional)
-	if !singleMutation || !structureMutated {
 		if rand.Float64() < g.Config.ConnDeleteProb {
-			// g.mutateDeleteConnection() // Placeholder - implement if needed
-			// structureMutated = true
+			g.mutateDeleteConnection()
 		}
 	}
 
-	// --- Non-Structural Mutations (Attribute Mutations) ---
-	// Mutate attributes of existing nodes.
-	for _, node := range g.Nodes {
-		node.Mutate(g.Config)
+	// Mutate node attributes.
+	for _, ng := range g.Nodes {
+		ng.Mutate(g.Config)
 	}
 
-	// Mutate attributes of existing connections.
-	for _, conn := range g.Connections {
-		conn.Mutate(g.Config)
+	// Mutate connection attributes.
+	for _, cg := range g.Connections {
+		cg.Mutate(g, g.Config) // Pass genome 'g' to connection mutation
 	}
 }
 
-// mutateAddNode attempts to add a new node by splitting an existing connection.
+// mutateAddNode adds a new node by splitting an existing connection.
 func (g *Genome) mutateAddNode() {
 	if len(g.Connections) == 0 {
 		return // Cannot split if no connections exist.
@@ -542,5 +579,59 @@ func createsCycle(genome *Genome, inNode, outNode int) bool {
 	return false // No path found
 }
 
-// TODO: Implement mutateDeleteNode and mutateDeleteConnection if needed.
+// mutateDeleteConnection removes a random existing connection.
+func (g *Genome) mutateDeleteConnection() {
+	if len(g.Connections) == 0 {
+		return // Cannot delete if no connections exist.
+	}
+
+	// Collect connection keys
+	keys := make([]ConnectionKey, 0, len(g.Connections))
+	for k := range g.Connections {
+		keys = append(keys, k)
+	}
+
+	// Select one randomly
+	keyToDelete := keys[rand.Intn(len(keys))]
+
+	// Delete it
+	delete(g.Connections, keyToDelete)
+}
+
+// mutateDeleteNode removes a random hidden/output node and its associated connections.
+func (g *Genome) mutateDeleteNode() {
+	// Collect possible nodes to delete (cannot delete inputs, only outputs/hidden)
+	deletableNodeKeys := make([]int, 0, len(g.Nodes))
+	for k := range g.Nodes {
+		// We identify hidden/output nodes by them being present in g.Nodes map
+		// (Input nodes are not in g.Nodes by default, only referred to by key)
+		// Double-check it's not an output node if there's a stricter policy needed,
+		// but standard NEAT allows deleting output nodes.
+		deletableNodeKeys = append(deletableNodeKeys, k)
+	}
+
+	if len(deletableNodeKeys) == 0 {
+		return // No hidden/output nodes to delete
+	}
+
+	// Select a node to delete randomly
+	keyToDelete := deletableNodeKeys[rand.Intn(len(deletableNodeKeys))]
+
+	// Delete the node itself
+	delete(g.Nodes, keyToDelete)
+
+	// Delete connections associated with this node
+	// Iterate over a copy of keys or collect keys first to avoid modification issues during iteration
+	connKeys := make([]ConnectionKey, 0, len(g.Connections))
+	for k := range g.Connections {
+		connKeys = append(connKeys, k)
+	}
+
+	for _, k := range connKeys {
+		if k.InNodeID == keyToDelete || k.OutNodeID == keyToDelete {
+			delete(g.Connections, k)
+		}
+	}
+}
+
 // TODO: Consider more sophisticated handling of disjoint/excess genes in Distance.

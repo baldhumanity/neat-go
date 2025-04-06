@@ -144,9 +144,11 @@ func (cg *ConnectionGene) Copy() *ConnectionGene {
 }
 
 // Mutate adjusts the attributes of the ConnectionGene based on mutation rates in the config.
-func (cg *ConnectionGene) Mutate(config *GenomeConfig) {
+// It now accepts the genome to check for cycles when enabling connections in feedforward mode.
+func (cg *ConnectionGene) Mutate(genome *Genome, config *GenomeConfig) {
 	cg.Weight = mutateFloatAttribute(cg.Weight, config.WeightMutateRate, config.WeightReplaceRate, config.WeightMutatePower, config.WeightInitMean, config.WeightInitStdev, config.WeightInitType, config.WeightMinValue, config.WeightMaxValue)
-	cg.Enabled = mutateBoolAttribute(cg.Enabled, config.EnabledMutateRate, config.EnabledRateToTrueAdd, config.EnabledRateToFalseAdd)
+	// Pass necessary context to mutateBoolAttribute for potential cycle check
+	cg.Enabled = mutateBoolAttribute(cg.Enabled, config.EnabledMutateRate, config.EnabledRateToTrueAdd, config.EnabledRateToFalseAdd, genome, cg)
 }
 
 // Distance calculates the genetic distance between two ConnectionGenes.
@@ -219,7 +221,7 @@ func initBoolAttribute(defaultValStr string) bool {
 	return parseBoolAttribute(defaultValStr) // Use helper from config.go (assuming it's accessible or moved)
 }
 
-func mutateBoolAttribute(value bool, mutateRate, rateToTrueAdd, rateToFalseAdd float64) bool {
+func mutateBoolAttribute(value bool, mutateRate, rateToTrueAdd, rateToFalseAdd float64, genome *Genome, cg *ConnectionGene) bool {
 	effectiveMutateRate := mutateRate
 	if value { // Currently true, might mutate to false
 		effectiveMutateRate += rateToFalseAdd
@@ -228,9 +230,17 @@ func mutateBoolAttribute(value bool, mutateRate, rateToTrueAdd, rateToFalseAdd f
 	}
 
 	if effectiveMutateRate > 0 && rand.Float64() < effectiveMutateRate {
-		// Flip the value (50% chance of becoming true, 50% chance false)
-		// This matches Python's random() < 0.5 behavior upon mutation trigger.
-		return rand.Float64() < 0.5
+		// Instead of just flipping, decide the new state (true or false).
+		newState := rand.Float64() < 0.5
+
+		// Cycle Check: Only allow enabling if it doesn't create a cycle in feedforward mode
+		if !value && newState && genome.Config.FeedForward {
+			// Trying to enable the connection (value=false, newState=true)
+			if createsCycle(genome, cg.Key.InNodeID, cg.Key.OutNodeID) {
+				return false // Prevent enabling if it creates a cycle
+			}
+		}
+		return newState // Return the randomly chosen state (true/false) if no cycle issue
 	}
 	// No mutation
 	return value
