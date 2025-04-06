@@ -18,7 +18,7 @@ NEAT is a genetic algorithm for the generation of evolving artificial neural net
 ## Installation
 
 ```go
-go get github.com/yourusername/neat-go
+go get github.com/baldhumanity/neat-go
 ```
 
 ## Quick Start
@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/yourusername/neat-go/neat"
+	"github.com/baldhumanity/neat-go/neat"
 )
 
 func main() {
