@@ -75,7 +75,7 @@ func (r *Reproduction) Reproduce(overallConfig *Config, speciesSet *SpeciesSet, 
 	for _, info := range stagnationInfo {
 		if info.IsStagnant {
 			// TODO: Report species stagnant (using reporter system later)
-			fmt.Printf("Info: Species %d removed due to stagnation.\n", info.SpeciesID)
+			// fmt.Printf("Info: Species %d removed due to stagnation.\n", info.SpeciesID)
 		} else {
 			sp := info.Species
 			memberFitnesses := sp.GetFitnesses()
@@ -84,7 +84,7 @@ func (r *Reproduction) Reproduce(overallConfig *Config, speciesSet *SpeciesSet, 
 				remainingSpecies = append(remainingSpecies, sp)
 			} else {
 				// Species has no members, even if not stagnant - cannot reproduce
-				fmt.Printf("Info: Species %d removed as it has no members.\n", info.SpeciesID)
+				// fmt.Printf("Info: Species %d removed as it has no members.\n", info.SpeciesID)
 			}
 		}
 	}

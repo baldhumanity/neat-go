@@ -196,17 +196,27 @@ func (net *FeedForwardNetwork) Activate(inputs []float64) ([]float64, error) {
 		nodeValues[ik] = inputs[i]
 	}
 
+	// Reusable buffer for incoming connection values to reduce allocations.
+	var incInputsBuffer []float64
+
 	// Activate nodes in topological order.
 	for _, nodeKey := range net.NodeEvalOrder {
 		node := net.Nodes[nodeKey]
 
 		// Gather inputs for this node based on incoming connections.
-		incInputs := make([]float64, 0, len(node.InputKeys))
+		// Reuse the buffer, ensuring it's reset (sliced to zero length).
+		// Ensure capacity is sufficient, grow if needed (less frequent than alloc).
+		if cap(incInputsBuffer) < len(node.InputKeys) {
+			incInputsBuffer = make([]float64, 0, len(node.InputKeys))
+		}
+		incInputs := incInputsBuffer[:0] // Reset slice length to 0, keep capacity
+
 		for _, connKey := range node.InputKeys {
 			conn := net.Connections[connKey]        // Assumes connection exists (validated during creation)
 			inValue := nodeValues[connKey.InNodeID] // Value from the source node
 			incInputs = append(incInputs, inValue*conn.Weight)
 		}
+		incInputsBuffer = incInputs // Update buffer reference in case append reallocated
 
 		// Aggregate inputs.
 		aggregated := node.AggregationFn(incInputs)
