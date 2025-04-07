@@ -82,61 +82,61 @@ func CreateFeedForwardNetwork(g *neat.Genome) (*FeedForwardNetwork, error) {
 	}
 	numNodes := len(allNodeKeysList)
 
-	// 2. Initialize the Nodes slice
+	// 2. Initialize the Nodes slice ensuring all nodes are covered
 	nodesSlice := make([]neuralNode, numNodes)
-	for key, gn := range g.Nodes {
-		idx, ok := nodeKeyToIndex[key]
-		if !ok {
-			// This should not happen if key collection was correct
-			return nil, fmt.Errorf("internal error: genome node key %d not found in index map", key)
-		}
-		actFn, err := neat.GetActivation(gn.Activation)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get activation function '%s' for node %d: %w", gn.Activation, key, err)
-		}
-		aggFn, err := neat.GetAggregation(gn.Aggregation)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get aggregation function '%s' for node %d: %w", gn.Aggregation, key, err)
-		}
-		nodesSlice[idx] = neuralNode{
-			OriginalKey:   key,
-			Bias:          gn.Bias,
-			Response:      gn.Response,
-			ActivationFn:  actFn,
-			AggregationFn: aggFn,
-			Inputs:        []InputConnection{}, // Initialize empty, populate next
-		}
-	}
-	// Initialize input nodes that might not be in g.Nodes (standard NEAT)
-	// Assume default bias=0, response=1, and lookup standard activation/aggregation functions.
-	identityFn, err := neat.GetActivation("identity") // Use standard name
+	identityFn, err := neat.GetActivation("identity") // Lookup defaults once
 	if err != nil {
 		return nil, fmt.Errorf("failed to get default 'identity' activation function: %w", err)
 	}
-	sumAggFn, err := neat.GetAggregation("sum") // Use standard name
+	sumAggFn, err := neat.GetAggregation("sum") // Lookup defaults once
 	if err != nil {
 		return nil, fmt.Errorf("failed to get default 'sum' aggregation function: %w", err)
 	}
 
-	for inputKey := range inputKeysMap {
-		if _, isInGenomeNodes := g.Nodes[inputKey]; !isInGenomeNodes {
-			idx := nodeKeyToIndex[inputKey]
-			nodesSlice[idx] = neuralNode{
-				OriginalKey:   inputKey,
-				Bias:          0.0,        // Default for input nodes
-				Response:      1.0,        // Default for input nodes
-				ActivationFn:  identityFn, // Inputs don't activate, but set a default
-				AggregationFn: sumAggFn,   // Inputs don't aggregate, but set a default
-				Inputs:        []InputConnection{},
+	for idx, key := range indexToNodeKey { // Iterate through ALL nodes by index/key
+		nodesSlice[idx].OriginalKey = key            // Set original key first
+		nodesSlice[idx].Inputs = []InputConnection{} // Ensure Inputs slice exists
+
+		if gn, isInGenome := g.Nodes[key]; isInGenome {
+			// Node is defined in the genome (could be hidden, output, or even input)
+			actFn, err := neat.GetActivation(gn.Activation)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get activation function '%s' for node %d: %w", gn.Activation, key, err)
 			}
+			aggFn, err := neat.GetAggregation(gn.Aggregation)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get aggregation function '%s' for node %d: %w", gn.Aggregation, key, err)
+			}
+			nodesSlice[idx].Bias = gn.Bias
+			nodesSlice[idx].Response = gn.Response
+			nodesSlice[idx].ActivationFn = actFn
+			nodesSlice[idx].AggregationFn = aggFn
+		} else if _, isInput := inputKeysMap[key]; isInput {
+			// Node is an input node NOT defined in the genome (pure input)
+			nodesSlice[idx].Bias = 0.0
+			nodesSlice[idx].Response = 1.0
+			nodesSlice[idx].ActivationFn = identityFn
+			nodesSlice[idx].AggregationFn = sumAggFn
 		} else {
-			// If an input key *is* in g.Nodes, its properties were set above.
-			// Need to ensure its Activation/Aggregation are appropriate if defined?
-			// For now, assume g.Nodes only contains hidden/output.
+			// Node is NOT in genome and NOT a pure input.
+			// This might be an output node listed in Config.OutputKeys but missing from g.Nodes,
+			// or a node referenced only by a connection (potentially invalid genome).
+			// Assigning defaults is a lenient approach; erroring might be stricter.
+			if _, isOutput := outputKeysMap[key]; isOutput {
+				// fmt.Printf("Warning: Output node %d not found in g.Nodes, using default functions/bias/response\n", key)
+			} else {
+				// This node isn't explicitly an output either - definitely unexpected.
+				// Consider returning an error here for stricter validation.
+				// fmt.Printf("Warning: Node %d used in network but not defined in g.Nodes, inputs, or outputs. Using defaults.\n", key)
+			}
+			nodesSlice[idx].Bias = 0.0                // Default
+			nodesSlice[idx].Response = 1.0            // Default
+			nodesSlice[idx].ActivationFn = identityFn // Default
+			nodesSlice[idx].AggregationFn = sumAggFn  // Default
 		}
 	}
 
-	// 3. Populate Inputs for each node in the slice
+	// 3. Populate Inputs for each node in the slice (this adds to the initialized nodesSlice)
 	for connKey, gc := range enabledConnections {
 		inNodeIndex, okIn := nodeKeyToIndex[connKey.InNodeID]
 		outNodeIndex, okOut := nodeKeyToIndex[connKey.OutNodeID]
