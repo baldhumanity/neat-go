@@ -7,44 +7,89 @@ import (
 	"github.com/baldhumanity/neat-go/neat" // Import the parent neat package
 )
 
-// neuralNode represents a node during network activation.
-// It stores pre-fetched activation/aggregation functions and node properties.
+// InputConnection stores pre-calculated information for an incoming connection to a node.
+type InputConnection struct {
+	InputNodeIndex int     // The slice index of the node providing input
+	Weight         float64 // The weight of the connection
+}
+
+// neuralNode represents a node during network activation, optimized for slice access.
+// It stores pre-fetched activation/aggregation functions and pre-processed input connection info.
 type neuralNode struct {
-	Key           int
+	OriginalKey   int // Original node key (useful for debugging/reference)
 	Bias          float64
 	Response      float64
 	ActivationFn  neat.ActivationType
 	AggregationFn neat.AggregationType
-	InputKeys     []neat.ConnectionKey // Incoming connections relevant to this node
+	Inputs        []InputConnection // Optimized incoming connections
 }
 
-// FeedForwardNetwork represents a phenotype network that can be activated.
-// It assumes a feed-forward structure (no cycles).
+// FeedForwardNetwork represents a phenotype network optimized for feed-forward activation using slice indexing.
 type FeedForwardNetwork struct {
-	InputKeys     []int                                      // List of input node keys (negative)
-	OutputKeys    []int                                      // List of output node keys (0 to N-1)
-	NodeEvalOrder []int                                      // Topologically sorted list of node keys for evaluation
-	Nodes         map[int]neuralNode                         // Map of node key -> processed node data
-	Connections   map[neat.ConnectionKey]neat.ConnectionGene // Map connection key -> connection gene (only enabled)
+	InputIndices  []int        // Slice indices for input nodes
+	OutputIndices []int        // Slice indices for output nodes
+	NodeEvalOrder []int        // Topologically sorted list of node slice indices for evaluation (excluding inputs)
+	Nodes         []neuralNode // Slice of all nodes (indexed 0..N-1), includes inputs
+	NumNodes      int          // Total number of nodes (inputs + hidden + outputs)
 }
 
-// CreateFeedForwardNetwork builds a runnable feed-forward network from a genome.
-// It performs a topological sort to determine the activation order.
+// CreateFeedForwardNetwork builds a runnable, optimized feed-forward network from a genome.
+// It assigns unique slice indices to each node and performs a topological sort on these indices.
 func CreateFeedForwardNetwork(g *neat.Genome) (*FeedForwardNetwork, error) {
 	if !g.Config.FeedForward {
-		// This function assumes FeedForward = true in config.
-		// A separate creator would be needed for recurrent networks.
 		return nil, fmt.Errorf("cannot create FeedForwardNetwork for a genome configured with FeedForward=false")
 	}
 
-	// Gather active nodes and connections
-	nodes := make(map[int]neuralNode)
-	connections := make(map[neat.ConnectionKey]neat.ConnectionGene)
-	incomingConnections := make(map[int][]neat.ConnectionKey) // nodeKey -> list of incoming connKeys
-	nodeKeys := make(map[int]bool)                            // Set of all node keys present (inputs implicitly included later)
+	// 1. Gather all unique node keys and create index mapping
+	allNodeKeysMap := make(map[int]struct{}) // Use a map as a set for uniqueness
+	inputKeysMap := make(map[int]struct{})
+	outputKeysMap := make(map[int]struct{})
 
-	// Process genome nodes
+	for _, k := range g.Config.InputKeys {
+		allNodeKeysMap[k] = struct{}{}
+		inputKeysMap[k] = struct{}{}
+	}
+	for _, k := range g.Config.OutputKeys {
+		allNodeKeysMap[k] = struct{}{}
+		outputKeysMap[k] = struct{}{}
+	}
+	for k := range g.Nodes {
+		allNodeKeysMap[k] = struct{}{}
+	}
+	enabledConnections := make(map[neat.ConnectionKey]neat.ConnectionGene)
+	for key, gc := range g.Connections {
+		if !gc.Enabled {
+			continue
+		}
+		enabledConnections[key] = *gc.Copy()
+		// Ensure connected nodes are included, even if not in input/output/defined nodes (shouldn't happen with valid genome)
+		allNodeKeysMap[key.InNodeID] = struct{}{}
+		allNodeKeysMap[key.OutNodeID] = struct{}{}
+	}
+
+	// Sort keys for deterministic index assignment
+	allNodeKeysList := make([]int, 0, len(allNodeKeysMap))
+	for k := range allNodeKeysMap {
+		allNodeKeysList = append(allNodeKeysList, k)
+	}
+	sort.Ints(allNodeKeysList)
+
+	nodeKeyToIndex := make(map[int]int, len(allNodeKeysList))
+	indexToNodeKey := make([]int, len(allNodeKeysList)) // Optional, for debugging/reference
+	for i, key := range allNodeKeysList {
+		nodeKeyToIndex[key] = i
+		indexToNodeKey[i] = key
+	}
+	numNodes := len(allNodeKeysList)
+
+	// 2. Initialize the Nodes slice
+	nodesSlice := make([]neuralNode, numNodes)
 	for key, gn := range g.Nodes {
+		idx, ok := nodeKeyToIndex[key]
+		if !ok {
+			// This should not happen if key collection was correct
+			return nil, fmt.Errorf("internal error: genome node key %d not found in index map", key)
+		}
 		actFn, err := neat.GetActivation(gn.Activation)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get activation function '%s' for node %d: %w", gn.Activation, key, err)
@@ -53,94 +98,94 @@ func CreateFeedForwardNetwork(g *neat.Genome) (*FeedForwardNetwork, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get aggregation function '%s' for node %d: %w", gn.Aggregation, key, err)
 		}
-		nodes[key] = neuralNode{
-			Key:           key,
+		nodesSlice[idx] = neuralNode{
+			OriginalKey:   key,
 			Bias:          gn.Bias,
 			Response:      gn.Response,
 			ActivationFn:  actFn,
 			AggregationFn: aggFn,
-			InputKeys:     []neat.ConnectionKey{}, // Initialize empty, populate later
-		}
-		nodeKeys[key] = true
-	}
-
-	// Process genome connections (only enabled ones)
-	for key, gc := range g.Connections {
-		if !gc.Enabled {
-			continue
-		}
-		connections[key] = *gc.Copy() // Store a copy
-
-		// Record incoming connection for the target node
-		outNodeKey := key.OutNodeID
-		if _, exists := incomingConnections[outNodeKey]; !exists {
-			incomingConnections[outNodeKey] = []neat.ConnectionKey{}
-		}
-		incomingConnections[outNodeKey] = append(incomingConnections[outNodeKey], key)
-
-		// Ensure connected nodes are considered in our node set
-		nodeKeys[key.InNodeID] = true
-		nodeKeys[key.OutNodeID] = true
-	}
-
-	// Populate InputKeys for each neuralNode
-	for key, node := range nodes {
-		if inputs, ok := incomingConnections[key]; ok {
-			node.InputKeys = inputs
-			nodes[key] = node // Update map entry
+			Inputs:        []InputConnection{}, // Initialize empty, populate next
 		}
 	}
+	// Initialize input nodes that might not be in g.Nodes (standard NEAT)
+	// Assume default bias=0, response=1, and lookup standard activation/aggregation functions.
+	identityFn, err := neat.GetActivation("identity") // Use standard name
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default 'identity' activation function: %w", err)
+	}
+	sumAggFn, err := neat.GetAggregation("sum") // Use standard name
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default 'sum' aggregation function: %w", err)
+	}
 
-	// Topological sort of nodes (Kahn's algorithm)
-	inDegree := make(map[int]int) // nodeKey -> count of incoming connections
-	graph := make(map[int][]int)  // nodeKey -> list of outgoing node keys
-	allNodeKeysList := []int{}
-
-	// Initialize graph and in-degrees
-	for nk := range nodeKeys {
-		allNodeKeysList = append(allNodeKeysList, nk)
-		inDegree[nk] = 0 // Initialize
-		if _, exists := graph[nk]; !exists {
-			graph[nk] = []int{}
+	for inputKey := range inputKeysMap {
+		if _, isInGenomeNodes := g.Nodes[inputKey]; !isInGenomeNodes {
+			idx := nodeKeyToIndex[inputKey]
+			nodesSlice[idx] = neuralNode{
+				OriginalKey:   inputKey,
+				Bias:          0.0,        // Default for input nodes
+				Response:      1.0,        // Default for input nodes
+				ActivationFn:  identityFn, // Inputs don't activate, but set a default
+				AggregationFn: sumAggFn,   // Inputs don't aggregate, but set a default
+				Inputs:        []InputConnection{},
+			}
+		} else {
+			// If an input key *is* in g.Nodes, its properties were set above.
+			// Need to ensure its Activation/Aggregation are appropriate if defined?
+			// For now, assume g.Nodes only contains hidden/output.
 		}
 	}
-	// Add input keys explicitly if they weren't part of g.Nodes (which they shouldn't be)
-	for _, ik := range g.Config.InputKeys {
-		if _, exists := nodeKeys[ik]; !exists {
-			allNodeKeysList = append(allNodeKeysList, ik)
-			inDegree[ik] = 0
-			graph[ik] = []int{}
-			nodeKeys[ik] = true // Add to the overall set
+
+	// 3. Populate Inputs for each node in the slice
+	for connKey, gc := range enabledConnections {
+		inNodeIndex, okIn := nodeKeyToIndex[connKey.InNodeID]
+		outNodeIndex, okOut := nodeKeyToIndex[connKey.OutNodeID]
+		if !okIn || !okOut {
+			// Should not happen
+			return nil, fmt.Errorf("internal error: connection key node (%d or %d) not found in index map", connKey.InNodeID, connKey.OutNodeID)
+		}
+
+		inputConn := InputConnection{
+			InputNodeIndex: inNodeIndex,
+			Weight:         gc.Weight,
+		}
+		nodesSlice[outNodeIndex].Inputs = append(nodesSlice[outNodeIndex].Inputs, inputConn)
+	}
+
+	// 4. Topological sort using indices (Kahn's algorithm)
+	inDegree := make([]int, numNodes)
+	graph := make([][]int, numNodes) // Adjacency list: graph[i] lists nodes that node i outputs to
+
+	for targetNodeIndex := range nodesSlice {
+		for _, inputConn := range nodesSlice[targetNodeIndex].Inputs {
+			sourceNodeIndex := inputConn.InputNodeIndex
+			inDegree[targetNodeIndex]++
+			if graph[sourceNodeIndex] == nil {
+				graph[sourceNodeIndex] = []int{}
+			}
+			graph[sourceNodeIndex] = append(graph[sourceNodeIndex], targetNodeIndex)
 		}
 	}
-	sort.Ints(allNodeKeysList) // Sort for deterministic processing (optional)
 
-	for connKey := range connections {
-		inNode := connKey.InNodeID
-		outNode := connKey.OutNodeID
-		graph[inNode] = append(graph[inNode], outNode)
-		inDegree[outNode]++
-	}
-
-	// Kahn's algorithm queue
+	// Kahn's algorithm queue (indices)
 	queue := []int{}
-	for _, nk := range allNodeKeysList {
-		if inDegree[nk] == 0 {
-			queue = append(queue, nk)
+	for i := 0; i < numNodes; i++ {
+		if inDegree[i] == 0 {
+			queue = append(queue, i)
 		}
 	}
 	sort.Ints(queue) // Sort initial queue for deterministic order
 
-	evalOrder := []int{}
+	fullEvalOrderIndices := []int{} // Stores the full order including inputs
 	for len(queue) > 0 {
-		// Dequeue node
+		// Dequeue node index
 		u := queue[0]
 		queue = queue[1:]
-		evalOrder = append(evalOrder, u)
+		fullEvalOrderIndices = append(fullEvalOrderIndices, u)
 
-		// Process neighbors
-		neighbors := graph[u]
-		sort.Ints(neighbors) // Process neighbors deterministically
+		// Process neighbors (indices)
+		neighbors := graph[u] // Nodes that 'u' outputs to
+		sort.Ints(neighbors)  // Process neighbors deterministically
 		for _, v := range neighbors {
 			inDegree[v]--
 			if inDegree[v] == 0 {
@@ -151,69 +196,80 @@ func CreateFeedForwardNetwork(g *neat.Genome) (*FeedForwardNetwork, error) {
 	}
 
 	// Check if sort was successful (cycle detection)
-	if len(evalOrder) != len(nodeKeys) {
-		// Cycle detected or disconnected nodes not reachable from inputs?
-		// This should ideally not happen in a feed-forward configured genome
-		// that passed validation, but check anyway.
-		return nil, fmt.Errorf("failed topological sort: cycle detected or graph issue (expected %d nodes, got %d)", len(nodeKeys), len(evalOrder))
+	if len(fullEvalOrderIndices) != numNodes {
+		// Cycle detected or graph issue
+		return nil, fmt.Errorf("failed topological sort: cycle detected or graph issue (expected %d nodes, got %d)", numNodes, len(fullEvalOrderIndices))
 	}
 
-	// Filter evalOrder to only include non-input nodes needed for activation loop
-	filteredEvalOrder := []int{}
-	inputKeySet := make(map[int]bool)
+	// 5. Filter evalOrder to exclude input node indices
+	finalEvalOrder := make([]int, 0, numNodes) // Capacity estimate
+	inputIndexSet := make(map[int]struct{})
 	for _, ik := range g.Config.InputKeys {
-		inputKeySet[ik] = true
+		inputIndexSet[nodeKeyToIndex[ik]] = struct{}{}
 	}
-	for _, nk := range evalOrder {
-		if !inputKeySet[nk] { // Exclude explicit input nodes
-			filteredEvalOrder = append(filteredEvalOrder, nk)
+	for _, nodeIndex := range fullEvalOrderIndices {
+		if _, isInput := inputIndexSet[nodeIndex]; !isInput {
+			finalEvalOrder = append(finalEvalOrder, nodeIndex)
 		}
 	}
 
+	// 6. Prepare InputIndices and OutputIndices
+	inputIndices := make([]int, len(g.Config.InputKeys))
+	for i, key := range g.Config.InputKeys {
+		inputIndices[i] = nodeKeyToIndex[key]
+	}
+	outputIndices := make([]int, len(g.Config.OutputKeys))
+	for i, key := range g.Config.OutputKeys {
+		outputIndices[i] = nodeKeyToIndex[key]
+	}
+
+	// 7. Construct the network
 	net := &FeedForwardNetwork{
-		InputKeys:     g.Config.InputKeys,
-		OutputKeys:    g.Config.OutputKeys,
-		NodeEvalOrder: filteredEvalOrder, // Use the order excluding inputs
-		Nodes:         nodes,
-		Connections:   connections,
+		InputIndices:  inputIndices,
+		OutputIndices: outputIndices,
+		NodeEvalOrder: finalEvalOrder, // Use the order excluding inputs
+		Nodes:         nodesSlice,
+		NumNodes:      numNodes,
 	}
 
 	return net, nil
 }
 
 // Activate computes the network's output for a given slice of input values.
-// The input slice must match the number of input nodes.
+// The input slice must match the number of input nodes configured.
+// This version uses slice indexing for potentially faster activation.
 func (net *FeedForwardNetwork) Activate(inputs []float64) ([]float64, error) {
-	if len(inputs) != len(net.InputKeys) {
-		return nil, fmt.Errorf("mismatch between input count (%d) and network input nodes (%d)", len(inputs), len(net.InputKeys))
+	if len(inputs) != len(net.InputIndices) {
+		return nil, fmt.Errorf("mismatch between input count (%d) and network input nodes (%d)", len(inputs), len(net.InputIndices))
 	}
 
-	// nodeValues stores the computed output of each node during activation.
-	nodeValues := make(map[int]float64)
+	// nodeValues stores the computed output of each node (indexed 0..NumNodes-1).
+	// Consider passing a pre-allocated buffer if Activate is called very frequently.
+	nodeValues := make([]float64, net.NumNodes)
 
-	// Initialize input node values.
-	for i, ik := range net.InputKeys {
-		nodeValues[ik] = inputs[i]
+	// Initialize input node values using their slice indices.
+	for i, inputIndex := range net.InputIndices {
+		nodeValues[inputIndex] = inputs[i]
 	}
 
 	// Reusable buffer for incoming connection values to reduce allocations.
 	var incInputsBuffer []float64
 
-	// Activate nodes in topological order.
-	for _, nodeKey := range net.NodeEvalOrder {
-		node := net.Nodes[nodeKey]
+	// Activate nodes in topological order (indices, excluding inputs).
+	for _, nodeIndex := range net.NodeEvalOrder {
+		node := net.Nodes[nodeIndex] // Fast slice access
 
-		// Gather inputs for this node based on incoming connections.
-		// Reuse the buffer, ensuring it's reset (sliced to zero length).
-		// Ensure capacity is sufficient, grow if needed (less frequent than alloc).
-		if cap(incInputsBuffer) < len(node.InputKeys) {
-			incInputsBuffer = make([]float64, 0, len(node.InputKeys))
+		// Gather weighted inputs for this node.
+		// Reuse the buffer.
+		requiredCapacity := len(node.Inputs)
+		if cap(incInputsBuffer) < requiredCapacity {
+			incInputsBuffer = make([]float64, 0, requiredCapacity)
 		}
-		incInputs := incInputsBuffer[:0] // Reset slice length to 0, keep capacity
+		// Reset slice length to 0, keep capacity.
+		incInputs := incInputsBuffer[:0]
 
-		for _, connKey := range node.InputKeys {
-			conn := net.Connections[connKey]        // Assumes connection exists (validated during creation)
-			inValue := nodeValues[connKey.InNodeID] // Value from the source node
+		for _, conn := range node.Inputs { // Iterate over pre-processed InputConnection slice
+			inValue := nodeValues[conn.InputNodeIndex] // Fast slice access for input value
 			incInputs = append(incInputs, inValue*conn.Weight)
 		}
 		incInputsBuffer = incInputs // Update buffer reference in case append reallocated
@@ -222,20 +278,21 @@ func (net *FeedForwardNetwork) Activate(inputs []float64) ([]float64, error) {
 		aggregated := node.AggregationFn(incInputs)
 
 		// Apply bias and response scaling, then activation function.
+		// Using direct float arithmetic is generally fast.
 		activationInput := aggregated + node.Bias
-		activationInput *= node.Response
+		activationInput *= node.Response // Apply response scaling
 		outputValue := node.ActivationFn(activationInput)
 
-		// Store the computed value for this node.
-		nodeValues[nodeKey] = outputValue
+		// Store the computed value for this node (fast slice assignment).
+		nodeValues[nodeIndex] = outputValue
 	}
 
-	// Collect outputs from the designated output nodes.
-	outputs := make([]float64, len(net.OutputKeys))
-	for i, ok := range net.OutputKeys {
-		// Output nodes might not have been activated if they had no incoming enabled connections.
-		// Default value should be 0 in that case, which is the default for map lookups.
-		outputs[i] = nodeValues[ok]
+	// Collect outputs from the designated output nodes using their indices.
+	outputs := make([]float64, len(net.OutputIndices))
+	for i, outputIndex := range net.OutputIndices {
+		// Output nodes might have 0 activation if they weren't reachable or had no inputs.
+		// Default float64 value (0.0) from nodeValues slice is correct here.
+		outputs[i] = nodeValues[outputIndex]
 	}
 
 	return outputs, nil
